@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "decision-cua": {
+      "command": "uv",
+      "args": ["run", "--directory", "C:/path/to/decision-cua", "dcua", "mcp"],
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      }
+    }
+  }
+}

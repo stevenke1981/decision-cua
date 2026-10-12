@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "decision-cua": {
+      "type": "local",
+      "command": ["uv", "run", "--directory", "C:/path/to/decision-cua", "dcua", "mcp"],
+      "enabled": true,
+      "environment": {
+        "OPENROUTER_API_KEY": "{env:OPENROUTER_API_KEY}"
+      }
+    }
+  }
+}
