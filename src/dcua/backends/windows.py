@@ -604,9 +604,12 @@ class WindowsBackend(Backend):
         codes = [_vk_for(k) for k in keys]
         downs = [_key(vk, flags=fl) for vk, fl in codes]
         ups = [_key(vk, flags=fl | KEYEVENTF_KEYUP) for vk, fl in reversed(codes)]
-        _send(*downs)
-        time.sleep(0.03)
-        _send(*ups)
+        # An open CJK IME turns letter keys into composition (e.g. "x" -> 力), so close it
+        # for the duration of the chord, the same way type_text does.
+        with _ime_closed():
+            _send(*downs)
+            time.sleep(0.03)
+            _send(*ups)
 
     def scroll(self, x: int, y: int, clicks: int) -> None:
         user32.SetCursorPos(int(x), int(y))
