@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from ctypes import wintypes
 from typing import Any
 
@@ -114,6 +115,50 @@ def _mouse(flags: int, data: int = 0) -> INPUT:
     inp = INPUT(type=INPUT_MOUSE)
     inp.u.mi = MOUSEINPUT(dx=0, dy=0, mouseData=data & 0xFFFFFFFF, dwFlags=flags, time=0, dwExtraInfo=0)
     return inp
+
+
+# ----------------------------------------------------------------------------- IME
+# An open CJK IME (Bopomofo, Pinyin, ...) lets VK_PACKET ideographs through but swallows
+# full-width punctuation into its composition buffer, so "你好，世界。" lands as
+# "你好世界" + "，。" later. Closing the IME of the focused window while typing avoids it;
+# WM_IME_CONTROL on the default IME window works across processes.
+imm32 = ctypes.WinDLL("imm32")
+imm32.ImmGetDefaultIMEWnd.argtypes = [wintypes.HWND]
+imm32.ImmGetDefaultIMEWnd.restype = wintypes.HWND
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = ctypes.c_ssize_t
+WM_IME_CONTROL, IMC_GETOPENSTATUS, IMC_SETOPENSTATUS = 0x0283, 0x0005, 0x0006
+
+
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD), ("hwndActive", wintypes.HWND),
+                ("hwndFocus", wintypes.HWND), ("hwndCapture", wintypes.HWND),
+                ("hwndMenuOwner", wintypes.HWND), ("hwndMoveSize", wintypes.HWND),
+                ("hwndCaret", wintypes.HWND), ("rcCaret", wintypes.RECT)]
+
+
+def _focus_hwnd() -> int:
+    info = GUITHREADINFO(cbSize=ctypes.sizeof(GUITHREADINFO))
+    if user32.GetGUIThreadInfo(0, ctypes.byref(info)) and info.hwndFocus:
+        return info.hwndFocus
+    return user32.GetForegroundWindow() or 0
+
+
+@contextmanager
+def _ime_closed():
+    """Temporarily close the focused window's IME; restore it afterwards."""
+    hwnd = _focus_hwnd()
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd) if hwnd else None
+    was_open = bool(ime) and user32.SendMessageW(ime, WM_IME_CONTROL, IMC_GETOPENSTATUS, 0) != 0
+    if was_open:
+        user32.SendMessageW(ime, WM_IME_CONTROL, IMC_SETOPENSTATUS, 0)
+        time.sleep(0.03)
+    try:
+        yield
+    finally:
+        if was_open:
+            time.sleep(0.03)
+            user32.SendMessageW(ime, WM_IME_CONTROL, IMC_SETOPENSTATUS, 1)
 
 
 def _vk_for(key: str) -> tuple[int, int]:
@@ -507,21 +552,22 @@ class WindowsBackend(Backend):
                 batch.clear()
                 time.sleep(0.01)
 
-        for ch in text:
-            if ch == "\r":
-                continue
-            if ch in "\n\t":
-                vk = VK["enter"] if ch == "\n" else VK["tab"]
-                batch += [_key(vk), _key(vk, flags=KEYEVENTF_KEYUP)]
-            else:
-                units = ch.encode("utf-16-le")
-                for i in range(0, len(units), 2):  # surrogate pairs -> two units
-                    unit = int.from_bytes(units[i:i + 2], "little")
-                    batch += [_key(0, unit, KEYEVENTF_UNICODE),
-                              _key(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]
-            if len(batch) >= 64:
-                flush()
-        flush()
+        with _ime_closed():
+            for ch in text:
+                if ch == "\r":
+                    continue
+                if ch in "\n\t":
+                    vk = VK["enter"] if ch == "\n" else VK["tab"]
+                    batch += [_key(vk), _key(vk, flags=KEYEVENTF_KEYUP)]
+                else:
+                    units = ch.encode("utf-16-le")
+                    for i in range(0, len(units), 2):  # surrogate pairs -> two units
+                        unit = int.from_bytes(units[i:i + 2], "little")
+                        batch += [_key(0, unit, KEYEVENTF_UNICODE),
+                                  _key(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)]
+                if len(batch) >= 64:
+                    flush()
+            flush()
 
     def press(self, keys: list[str]) -> None:
         keys = parse_chord(keys)
