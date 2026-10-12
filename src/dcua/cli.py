@@ -1,4 +1,4 @@
-"""Command line: dcua run | observe | windows | ground | mcp | doctor"""
+"""Command line: dcua run | observe | windows | ground | pacman | mcp | doctor"""
 from __future__ import annotations
 
 import argparse
@@ -106,6 +106,51 @@ async def cmd_ground(s: Settings, intent: str, action: str, as_json: bool = Fals
     return 0
 
 
+def cmd_pacman(s: Settings, fake: bool, headless: bool, steps: int, delay_ms: int, seed: int) -> int:
+    """Watch Decision-1 (or the offline heuristic) play Pac-Man, one decision per tick."""
+    from .decisions import DecisionClient
+    from .games.pacman import PacmanGame
+    from .games.pacman_agent import DecisionPolicy, HeuristicPolicy, play
+
+    client = None
+    if fake:
+        policy = HeuristicPolicy()
+    else:
+        if not s.openrouter_api_key:
+            print("OPENROUTER_API_KEY is not set. Set it, or run `dcua pacman --fake` (offline, no cost).")
+            return 1
+        client = DecisionClient(s.openrouter_api_key, model=s.decision_model, url=s.decision_url,
+                                timeout=s.decision_timeout, app_title="decision-cua pacman")
+        policy = DecisionPolicy(client)
+
+    if not headless:
+        from .games.pacman_tk import run_app
+
+        run_app(policy, seed=seed, delay_ms=delay_ms, max_steps=steps,
+                closer=client.aclose if client else None)
+        return 0
+
+    def on_step(i, d, game):
+        probs = " ".join(f"{k}={v:.2f}" for k, v in sorted(d.probabilities.items(), key=lambda kv: -kv[1]))
+        events = f"  [{', '.join(game.events)}]" if game.events else ""
+        print(f"{i:04d} {d.move:5s} p={d.p:.2f} {d.source:10s} score={game.score:5d} lives={game.lives}  "
+              f"{probs}{events}")
+
+    async def go():
+        try:
+            return await play(PacmanGame(seed=seed), policy, max_steps=steps, on_step=on_step)
+        finally:
+            if client:
+                await client.aclose()
+
+    summary = asyncio.run(go())
+    result = "WIN" if summary.won else ("GAME OVER" if summary.lives <= 0 else "STEP LIMIT")
+    print(f"\n{result}  score={summary.score}  steps={summary.steps}  lives={summary.lives}  "
+          f"model_calls={summary.model_calls}  avg_latency={summary.avg_latency_ms:.0f} ms  "
+          f"cost=${summary.cost:.5f}")
+    return 0
+
+
 async def cmd_doctor(s: Settings) -> int:
     from .decisions import Choice, DecisionClient, Noul
 
@@ -161,6 +206,13 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--action", default="click", choices=["click", "type", "scroll"])
     p.add_argument("--json", action="store_true", help="print the full result as JSON")
 
+    p = sub.add_parser("pacman", help="watch Microsoft-Decision-1 play Pac-Man, with move probabilities")
+    p.add_argument("--fake", action="store_true", help="offline heuristic policy (no API calls, no cost)")
+    p.add_argument("--headless", action="store_true", help="no window: print one line per move")
+    p.add_argument("--steps", type=int, default=600, help="stop after this many ticks (default 600)")
+    p.add_argument("--delay", type=int, default=400, help="ms the arrows stay on screen before moving")
+    p.add_argument("--seed", type=int, default=0, help="ghost randomness seed")
+
     sub.add_parser("mcp", help="start the MCP server on stdio")
     sub.add_parser("doctor", help="check configuration and call the Decisions API once")
 
@@ -191,6 +243,8 @@ def main(argv: list[str] | None = None) -> None:
         code = asyncio.run(cmd_windows(s))
     elif args.cmd == "ground":
         code = asyncio.run(cmd_ground(s, args.intent, args.action, args.json))
+    elif args.cmd == "pacman":
+        code = cmd_pacman(s, args.fake, args.headless, args.steps, args.delay, args.seed)
     else:
         code = asyncio.run(cmd_doctor(s))
     sys.exit(code)

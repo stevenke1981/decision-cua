@@ -106,6 +106,21 @@ async def main():
 asyncio.run(main())
 ```
 
+## 示範：Decision-1 玩 Pac-Man
+
+看 Microsoft-Decision-1 每一步在合法方向間做選擇，畫面上的箭頭長短與百分比就是模型給各方向的機率。
+
+```powershell
+uv run dcua pacman                    # 視窗版，Decision-1 決策（需要 OPENROUTER_API_KEY）
+uv run dcua pacman --fake             # 離線啟發式策略，不呼叫 API、不花錢
+uv run dcua pacman --headless --steps 100   # 不開視窗，每步印出方向、機率、分數，最後印出成本
+```
+
+- 每步一次 `Choice` 問題：選項只列合法方向，描述附上「吃到豆子 / 最近的豆子幾步 / 最近的危險鬼幾步 / 可吃的鬼幾步」，盤面以文字送出。
+- 只剩一個出口時不呼叫模型；API 失敗時該步改用啟發式策略並在畫面標示 `fallback`。
+- 實測（本機）：每次決策約 550–700 ms、約 $0.00002，60 步約 $0.0012。
+- 按鍵：空白鍵暫停、`r` 重來、`q` / `Esc` 離開。`--delay` 調整箭頭停留時間（預設 400 ms）。
+
 ## 除錯與調門檻
 
 ```powershell
@@ -141,8 +156,12 @@ src/dcua/
   agent.py            planner 迴圈（tools / json 兩種協定、context 修剪）
   tools.py            工具定義
   mcp_server.py       MCP server（相容 MCP SDK 1.x 與 2.x）
-  cli.py              dcua run | observe | windows | ground | mcp | doctor
-tests/                31 個測試：模擬 Decisions API + 腳本化 planner + 假桌面的端到端流程
+  cli.py              dcua run | observe | windows | ground | pacman | mcp | doctor
+  games/
+    pacman.py         Pac-Man 規則與盤面文字（無 UI，可測試）
+    pacman_agent.py   Decision-1 / 啟發式策略、無視窗遊戲迴圈
+    pacman_tk.py      tkinter 視窗：迷宮、HUD、機率箭頭
+tests/                55 個測試：模擬 Decisions API + 腳本化 planner + 假桌面的端到端流程、Pac-Man 規則與策略
 skills/               給 agent 用的 SKILL.md
 integrations/         OpenCode / Claude Code 設定範例
 ```
