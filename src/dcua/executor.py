@@ -24,7 +24,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterator
 
 from .backends import Backend, Element, Snapshot, WindowInfo, create_backend
@@ -320,13 +320,13 @@ class ComputerController:
     async def _wait_new_window(self, known: set[Any], app: str) -> WindowInfo | None:
         """A new window, preferring one whose process matches the launched app, so a splash
         screen or an unrelated toast does not win. Other new windows count after a grace period."""
-        stem = Path(app.strip('"')).stem.lower()
+        stem = PureWindowsPath(app.strip('"')).stem.lower()
         start = time.monotonic()
         while True:
             await asyncio.sleep(0.25)
             wins: list[WindowInfo] = await self.backend.call("list_windows")
             new = [w for w in wins if w.handle not in known]
-            own = [w for w in new if stem and Path(w.process).stem.lower() == stem]
+            own = [w for w in new if stem and PureWindowsPath(w.process).stem.lower() == stem]
             waited = time.monotonic() - start
             if own or (new and waited >= LAUNCH_GRACE_S) or waited >= self.s.launch_wait_s:
                 pool = own or new
