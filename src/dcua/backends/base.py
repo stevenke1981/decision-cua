@@ -166,6 +166,11 @@ class Backend(ABC):
         """clicks > 0 scrolls up, < 0 scrolls down."""
 
     # ------------------------------------------------------------- optional
+    def mouse_drag(self, x1: int, y1: int, x2: int, y2: int, button: str = "left",
+                   steps: int = 20) -> None:
+        """Press at (x1, y1), move in `steps` increments to (x2, y2), release."""
+        raise NotImplementedError(f"{self.name} backend does not support drag")
+
     def invoke(self, el: Element) -> bool:
         """Accessibility 'invoke' instead of a mouse click. Return False if unsupported."""
         return False

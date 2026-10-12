@@ -108,6 +108,10 @@ class FakeBackend(Backend):
             self.focus = wd
         self._fire(wd.on_click)
 
+    def mouse_drag(self, x1: int, y1: int, x2: int, y2: int, button: str = "left",
+                   steps: int = 20) -> None:
+        self.log.append(f"drag {button} ({x1},{y1}) -> ({x2},{y2})")
+
     def _fire(self, action: str) -> None:
         if action == "open_save":
             dlg = FakeWindow(3, "Save As", "notepad.exe", Rect(400, 300, 1000, 600))

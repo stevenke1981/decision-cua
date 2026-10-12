@@ -1,20 +1,31 @@
 """Tool catalogue shared by the built-in agent loop (OpenAI tool schema) and docs."""
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .executor import ComputerController
 
-TARGET_DOC = ("Either an element id from observe() like 'e12', or a precise natural-language "
-              "description, e.g. 'the Save button in the Save As dialog'.")
+TARGET_DOC = ("Either an element id from observe() like 'e12', a precise natural-language "
+              "description, e.g. 'the Save button in the Save As dialog', or screen coordinates 'x,y' "
+              "(from screenshot) for surfaces without accessible elements such as canvases.")
 EXPECT_DOC = "Optional: what should be visible afterwards (used to verify the step)."
+REVISION_DOC = ("Optional: the revision from observe/ground/a previous result that this step was decided "
+                "on. If the screen changed since, nothing is done and status is 'stale'.")
 
 TOOL_SPECS: list[dict[str, Any]] = [
     {"name": "observe",
      "description": "Read the current screen as text: foreground window, focus, and interactive elements with ids. Call this first and whenever unsure.",
      "parameters": {"type": "object", "properties": {
          "full": {"type": "boolean", "description": "List every element instead of the top ones."},
-         "all_windows": {"type": "boolean", "description": "Include elements of all windows (slow)."}}}},
+         "all_windows": {"type": "boolean", "description": "Include elements of all windows (slow)."},
+         "format": {"type": "string", "enum": ["text", "json"],
+                    "description": "json = machine-readable (ids, rects, values, revision, observed_at)."}}}},
+    {"name": "ground",
+     "description": "Dry run: which element a target resolves to, alternatives, and risk. Sends no input.",
+     "parameters": {"type": "object", "properties": {
+         "target": {"type": "string", "description": TARGET_DOC},
+         "action": {"type": "string", "enum": ["click", "type", "scroll"]}}, "required": ["target"]}},
     {"name": "list_windows", "description": "List open top-level windows.",
      "parameters": {"type": "object", "properties": {}}},
     {"name": "focus_window", "description": "Bring a window to the front by (part of) its title or a description.",
@@ -28,8 +39,17 @@ TOOL_SPECS: list[dict[str, Any]] = [
          "button": {"type": "string", "enum": ["left", "right", "middle"]},
          "double": {"type": "boolean"},
          "expect": {"type": "string", "description": EXPECT_DOC},
-         "confirm": {"type": "boolean", "description": "Set true only after the user approved a consequential action."}},
+         "confirm": {"type": "boolean", "description": "Set true only after the user approved a consequential action."},
+         "if_revision": {"type": "string", "description": REVISION_DOC}},
          "required": ["target"]}},
+    {"name": "drag", "description": "Press on start, move to end, release (draw, select a range, move a slider or item).",
+     "parameters": {"type": "object", "properties": {
+         "start": {"type": "string", "description": TARGET_DOC},
+         "end": {"type": "string", "description": TARGET_DOC},
+         "button": {"type": "string", "enum": ["left", "right", "middle"]},
+         "expect": {"type": "string", "description": EXPECT_DOC},
+         "confirm": {"type": "boolean"},
+         "if_revision": {"type": "string", "description": REVISION_DOC}}, "required": ["start", "end"]}},
     {"name": "type_text", "description": "Type text (any language). Without target it types into the focused element.",
      "parameters": {"type": "object", "properties": {
          "text": {"type": "string"},
@@ -37,11 +57,13 @@ TOOL_SPECS: list[dict[str, Any]] = [
          "clear": {"type": "boolean", "description": "Clear the field first."},
          "submit": {"type": "boolean", "description": "Press Enter afterwards."},
          "expect": {"type": "string", "description": EXPECT_DOC},
-         "confirm": {"type": "boolean"}}, "required": ["text"]}},
+         "confirm": {"type": "boolean"},
+         "if_revision": {"type": "string", "description": REVISION_DOC}}, "required": ["text"]}},
     {"name": "hotkey", "description": "Press a key or chord, e.g. 'ctrl+s', 'alt+tab', 'enter', 'win+e'.",
      "parameters": {"type": "object", "properties": {
          "keys": {"type": "string"}, "expect": {"type": "string", "description": EXPECT_DOC},
-         "confirm": {"type": "boolean"}}, "required": ["keys"]}},
+         "confirm": {"type": "boolean"},
+         "if_revision": {"type": "string", "description": REVISION_DOC}}, "required": ["keys"]}},
     {"name": "scroll", "description": "Scroll the foreground window or a target element.",
      "parameters": {"type": "object", "properties": {
          "direction": {"type": "string", "enum": ["up", "down"]},
@@ -71,7 +93,10 @@ async def dispatch(ctrl: ComputerController, name: str, args: dict[str, Any]) ->
     """Execute a computer tool and return text for the model."""
     a = {k: v for k, v in (args or {}).items() if v is not None}
     if name == "observe":
-        return await ctrl.observe(full=bool(a.get("full")), all_windows=bool(a.get("all_windows")))
+        return await ctrl.observe(full=bool(a.get("full")), all_windows=bool(a.get("all_windows")),
+                                  fmt=a.get("format", "text"))
+    if name == "ground":
+        return json.dumps(await ctrl.ground(str(a["target"]), a.get("action", "click")), ensure_ascii=False)
     if name == "list_windows":
         return await ctrl.list_windows()
     if name == "focus_window":
@@ -81,14 +106,18 @@ async def dispatch(ctrl: ComputerController, name: str, args: dict[str, Any]) ->
     if name == "click":
         return (await ctrl.click(str(a["target"]), button=a.get("button", "left"),
                                  double=bool(a.get("double")), expect=a.get("expect"),
-                                 confirm=bool(a.get("confirm")))).to_text()
+                                 confirm=bool(a.get("confirm")), if_revision=a.get("if_revision"))).to_text()
+    if name == "drag":
+        return (await ctrl.drag(str(a["start"]), str(a["end"]), button=a.get("button", "left"),
+                                expect=a.get("expect"), confirm=bool(a.get("confirm")),
+                                if_revision=a.get("if_revision"))).to_text()
     if name == "type_text":
         return (await ctrl.type_text(str(a["text"]), target=a.get("target"), clear=bool(a.get("clear")),
                                      submit=bool(a.get("submit")), expect=a.get("expect"),
-                                     confirm=bool(a.get("confirm")))).to_text()
+                                     confirm=bool(a.get("confirm")), if_revision=a.get("if_revision"))).to_text()
     if name == "hotkey":
         return (await ctrl.hotkey(str(a["keys"]), expect=a.get("expect"),
-                                  confirm=bool(a.get("confirm")))).to_text()
+                                  confirm=bool(a.get("confirm")), if_revision=a.get("if_revision"))).to_text()
     if name == "scroll":
         return (await ctrl.scroll(a.get("direction", "down"), int(a.get("amount", 5)),
                                   a.get("target"))).to_text()

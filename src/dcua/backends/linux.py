@@ -131,6 +131,19 @@ class LinuxBackend(Backend):
         btn = {"left": "1", "middle": "2", "right": "3"}[button]
         _run("xdotool", "mousemove", str(x), str(y), "click", "--repeat", "2" if double else "1", btn)
 
+    def mouse_drag(self, x1: int, y1: int, x2: int, y2: int, button: str = "left",
+                   steps: int = 20) -> None:
+        btn = {"left": "1", "middle": "2", "right": "3"}[button]
+        # xdotool would read a negative coordinate as an option; X screens start at 0.
+        x1, y1, x2, y2 = (max(0, int(v)) for v in (x1, y1, x2, y2))
+        _run("xdotool", "mousemove", str(x1), str(y1), "mousedown", btn)
+        try:
+            n = max(1, steps)
+            for i in range(1, n + 1):
+                _run("xdotool", "mousemove", str(x1 + (x2 - x1) * i // n), str(y1 + (y2 - y1) * i // n))
+        finally:
+            _run("xdotool", "mouseup", btn)  # never leave the button held down
+
     def type_text(self, text: str) -> None:
         _run("xdotool", "type", "--delay", "8", "--", text)
 

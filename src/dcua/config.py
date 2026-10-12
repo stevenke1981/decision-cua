@@ -62,6 +62,7 @@ class Settings:
     max_elements: int = 600            # UIA elements walked per snapshot
     snapshot_budget_s: float = 4.0     # time budget for one UIA walk
     settle_s: float = 0.5              # wait after an action before re-observing
+    launch_wait_s: float = 5.0         # how long launch() waits for the new app window
     outline_limit: int = 60            # elements shown to the planner in an outline observation
     max_steps: int = 40
     click_mode: str = "mouse"          # "mouse" | "invoke" | "auto"

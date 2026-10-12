@@ -5,6 +5,7 @@ gating and verification. Run:  dcua mcp   (stdio transport)
 """
 from __future__ import annotations
 
+import json
 import logging
 import sys
 
@@ -33,9 +34,16 @@ def build_server(settings: Settings | None = None) -> _Server:
         return holder["c"]
 
     @server.tool()
-    async def observe(full: bool = False, all_windows: bool = False) -> str:
-        """Read the screen as text: foreground window, keyboard focus, UI elements with ids."""
-        return await ctrl().observe(full=full, all_windows=all_windows)
+    async def observe(full: bool = False, all_windows: bool = False, format: str = "text") -> str:
+        """Read the screen: foreground window, keyboard focus, UI elements with ids, and a revision.
+        format='json' returns ids, rects, values, revision and observed_at as JSON."""
+        return await ctrl().observe(full=full, all_windows=all_windows, fmt=format)
+
+    @server.tool()
+    async def ground(target: str, action: str = "click") -> str:
+        """Dry run (sends no input): which element `target` resolves to, the alternatives with
+        probabilities, the risk, whether it would need confirmation, and the screen revision."""
+        return json.dumps(await ctrl().ground(target, action), ensure_ascii=False)
 
     @server.tool()
     async def list_windows() -> str:
@@ -54,23 +62,34 @@ def build_server(settings: Settings | None = None) -> _Server:
 
     @server.tool()
     async def click(target: str, button: str = "left", double: bool = False,
-                    expect: str | None = None, confirm: bool = False) -> str:
-        """Click an element. target = element id like 'e12' or a precise description.
-        expect = what should be visible afterwards (enables verification)."""
+                    expect: str | None = None, confirm: bool = False, if_revision: str | None = None) -> str:
+        """Click an element. target = element id like 'e12', a precise description, or 'x,y'
+        screen coordinates (from screenshot) for canvases and other surfaces without elements.
+        expect = what should be visible afterwards (enables verification).
+        if_revision = refuse (status stale) if the screen changed since that revision."""
         return (await ctrl().click(target, button=button, double=double, expect=expect,
-                                   confirm=confirm)).to_text()
+                                   confirm=confirm, if_revision=if_revision)).to_text()
+
+    @server.tool()
+    async def drag(start: str, end: str, button: str = "left", expect: str | None = None,
+                   confirm: bool = False, if_revision: str | None = None) -> str:
+        """Press on start, move to end, release: draw on a canvas, select a range, move a slider.
+        start/end = element id, description, or 'x,y' screen coordinates."""
+        return (await ctrl().drag(start, end, button=button, expect=expect, confirm=confirm,
+                                  if_revision=if_revision)).to_text()
 
     @server.tool()
     async def type_text(text: str, target: str | None = None, clear: bool = False, submit: bool = False,
-                        expect: str | None = None, confirm: bool = False) -> str:
+                        expect: str | None = None, confirm: bool = False, if_revision: str | None = None) -> str:
         """Type text (any language). Without target, types into the focused element."""
         return (await ctrl().type_text(text, target=target, clear=clear, submit=submit, expect=expect,
-                                       confirm=confirm)).to_text()
+                                       confirm=confirm, if_revision=if_revision)).to_text()
 
     @server.tool()
-    async def hotkey(keys: str, expect: str | None = None, confirm: bool = False) -> str:
+    async def hotkey(keys: str, expect: str | None = None, confirm: bool = False,
+                     if_revision: str | None = None) -> str:
         """Press a key or chord, e.g. 'ctrl+s', 'alt+tab', 'enter', 'win+e'."""
-        return (await ctrl().hotkey(keys, expect=expect, confirm=confirm)).to_text()
+        return (await ctrl().hotkey(keys, expect=expect, confirm=confirm, if_revision=if_revision)).to_text()
 
     @server.tool()
     async def scroll(direction: str = "down", amount: int = 5, target: str | None = None) -> str:

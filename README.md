@@ -33,6 +33,10 @@
 | 誤刪、誤送出 | 動作前風險判斷，高風險需人工確認 |
 | 網頁/文件裡藏 prompt injection | observe 時自動掃描並警告 |
 | 宣稱完成但其實沒做完 | done 時以畫面獨立檢查，最多退回兩次 |
+| 畫布、自繪 ribbon 沒有元件可點 | 目標可直接給螢幕座標 `"x,y"`（取自截圖），仍經風險閘門；另有 `drag` 可畫線、拖選 |
+| 判斷時的畫面和動手時不同 | `observe(format="json")` 給 `revision`；動作帶 `if_revision`，畫面變了就回 `stale`、不動作 |
+| 新開的程式跑到背景，輸入送錯視窗 | `launch` 等新視窗出現並拉到前景；動作前若前景被搶走，先切回原視窗 |
+| 不知道慢在哪 | 每個結果附 `timing:`（observe / decide / act / settle / verify 各段毫秒） |
 
 ## 安裝（Windows）
 
@@ -41,12 +45,12 @@
 ```powershell
 git clone <this repo> decision-cua
 cd decision-cua
-uv sync --extra windows --extra mcp          # 或: pip install -e ".[windows,mcp]"
+uv sync --extra windows --extra mcp --extra vision   # 或: pip install -e ".[windows,mcp,vision]"
 copy .env.example .env                        # 填入 OPENROUTER_API_KEY
 uv run dcua doctor                            # 檢查設定並實際呼叫一次 Decisions API
 ```
 
-選用：`--extra vision`（Pillow，帶 id 標記的截圖給有視覺的 planner）。
+`--extra vision`（Pillow）提供截圖：給有視覺的 planner 看帶 id 標記的畫面，也是座標目標 `"x,y"` 的來源。
 
 ## 三種用法
 
@@ -69,8 +73,12 @@ uv run dcua run "..." --protocol json --model <model-id>
 
 ### 2. MCP server（OpenCode / Claude Code / Cline…）
 
-客戶端自己的模型當 planner，decision-cua 提供 10 個工具：
-`observe, list_windows, focus_window, launch, click, type_text, hotkey, scroll, wait, screenshot`。
+客戶端自己的模型當 planner，decision-cua 提供 12 個工具：
+`observe, ground, list_windows, focus_window, launch, click, drag, type_text, hotkey, scroll, wait, screenshot`。
+
+- `ground(target)`：只判斷不動作。回 JSON：選中的元件、候選與機率、risk、是否需確認、`revision`。
+- `observe(format="json")`：元件 id、rect、值、`revision`、`observed_at`（含時區），供程式或外部審查使用。
+- `click` / `type_text` / `hotkey` / `drag` 皆可帶 `if_revision`，把動作綁定在做決定時的畫面上。
 
 **OpenCode** — 把 `integrations/opencode.json` 的 `mcp` 區塊併入你的 `opencode.json`。
 **Claude Code** — `claude mcp add decision-cua -- uv run --directory C:\path\to\decision-cua dcua mcp`
@@ -104,7 +112,9 @@ asyncio.run(main())
 uv run dcua windows                 # 列出視窗
 uv run dcua observe                 # 前景視窗大綱（給 planner 看的就是這個）
 uv run dcua observe --full --all    # 全部元件、全部視窗
-uv run dcua ground "檔名輸入框" --action type   # 只判斷不動作：選中誰、排名、機率、risk
+uv run dcua observe --json         # 機器可讀狀態（含 revision）
+uv run dcua ground "檔名輸入框" --action type   # 只判斷不動作：選中誰、排名、機率、risk、各段耗時
+uv run dcua ground "640,360" --json             # 座標目標：底下是哪個元件、風險多少
 ```
 
 `DCUA_BACKEND=fake` 會換成記憶體裡的假桌面（記事本 + 另存新檔），不碰真實滑鼠鍵盤，適合先試流程。
@@ -132,7 +142,7 @@ src/dcua/
   tools.py            工具定義
   mcp_server.py       MCP server（相容 MCP SDK 1.x 與 2.x）
   cli.py              dcua run | observe | windows | ground | mcp | doctor
-tests/                20 個測試：模擬 Decisions API + 腳本化 planner + 假桌面的端到端流程
+tests/                31 個測試：模擬 Decisions API + 腳本化 planner + 假桌面的端到端流程
 skills/               給 agent 用的 SKILL.md
 integrations/         OpenCode / Claude Code 設定範例
 ```
@@ -144,6 +154,8 @@ uv run --extra dev pytest -q
 ## 已知限制
 
 - 以系統管理員執行的視窗需要以系統管理員執行 dcua（Windows UIPI）。
-- 沒有 accessibility 樹的畫面（遊戲、Canvas、遠端桌面）無法操作。
+- 沒有 accessibility 樹的畫面（遊戲、Canvas、遠端桌面）只能用座標目標操作，且驗證看不到像素，結果多為 `unverified`，需另以截圖確認。
+- `revision` 涵蓋畫面上的文字與值；顯示即時資訊（時鐘、游標座標）的 App 會讓它頻繁變動，`if_revision` 宜只用在關鍵步驟。
+- 會真的移動滑鼠、按鍵；執行期間請勿同時操作電腦。
 - Decisions API 在 OpenRouter 上仍是 alpha；回應格式若變動，只需改 `decisions.py` 的 `_parse`。
 - 門檻是起始值，請用 `dcua ground` 在你常用的 App 上實測後調整。

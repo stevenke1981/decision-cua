@@ -1,10 +1,14 @@
 """Turn UIA snapshots into compact text for LLMs and JSON state for the decision model."""
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from .backends.base import Element, Snapshot
+from .backends.base import Element, Rect, Snapshot
 
 INTERACTIVE = {
     "Button", "SplitButton", "MenuItem", "Hyperlink", "CheckBox", "RadioButton", "TabItem",
@@ -74,6 +78,99 @@ def render_outline(snap: Snapshot, *, limit: int = 60, full: bool = False) -> st
         lines.append(f"  ... {hidden} more elements not listed. You can still target them by "
                      "describing them in words (grounding searches all elements), or call observe(full=true).")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- machine-readable state
+def element_dict(el: Element) -> dict[str, Any]:
+    r = el.rect
+    return {
+        "id": el.id, "role": el.role, "name": el.name, "automation_id": el.automation_id or None,
+        "value": el.value, "enabled": el.enabled, "focused": el.focused, "window": el.window,
+        "path": el.path or None,
+        "rect": [r.left, r.top, r.right, r.bottom] if r else None,
+        "center": list(r.center) if r else None,
+    }
+
+
+def snapshot_revision(snap: Snapshot) -> str:
+    """Short hash of what the agent can see in the foreground: window, elements, values, positions.
+
+    Two snapshots with the same revision show the same state, so a decision made on one
+    (by the agent, a human or an external reviewer) still applies to the other.
+    """
+    fg = snap.foreground
+    # Only the foreground window and its popups: actions re-observe that scope, so a revision
+    # taken from observe(all_windows=True) still matches when nothing changed in front.
+    scope = {fg.title, f"{fg.title} (popup)"} if fg else set()
+    payload = [[fg.handle, fg.title] if fg else None,
+               [(e.role, e.name, e.automation_id, e.window, e.path, e.value, e.enabled, e.focused,
+                 (e.rect.left, e.rect.top, e.rect.right, e.rect.bottom) if e.rect else None)
+                for e in snap.elements if not fg or e.window in scope]]
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def iso_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).astimezone().isoformat(timespec="milliseconds")
+
+
+def snapshot_json(snap: Snapshot, *, limit: int = 60, full: bool = False) -> dict[str, Any]:
+    elements = snap.elements if full else sorted(snap.elements, key=rank_for_outline)[:limit]
+    fg = snap.foreground
+    return {
+        "revision": snapshot_revision(snap),
+        "observed_at": iso_time(snap.taken_at),
+        "foreground_window": ({"title": fg.title, "process": fg.process or None,
+                               "rect": [fg.rect.left, fg.rect.top, fg.rect.right, fg.rect.bottom]
+                               if fg.rect else None} if fg else None),
+        "other_windows": [w.title for w in snap.windows if not w.focused],
+        "focused_element": snap.focused.id if snap.focused else None,
+        "screen": [snap.screen.left, snap.screen.top, snap.screen.right, snap.screen.bottom],
+        "elements": [element_dict(e) for e in elements],
+        "total_elements": len(snap.elements),
+        "truncated": snap.truncated,
+    }
+
+
+POINT_RE = re.compile(r"^\s*\(?\s*(-?\d{1,6})\s*,\s*(-?\d{1,6})\s*\)?\s*$")
+
+
+def parse_point(target: str) -> tuple[int, int] | None:
+    """'640,360' or '(640, 360)' -> (640, 360); anything else -> None."""
+    m = POINT_RE.match(target or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def element_at(snap: Snapshot, x: int, y: int) -> Element | None:
+    """Smallest element whose box contains the point (what a click there would most likely hit)."""
+    hits = [e for e in snap.elements if e.rect and e.rect.area > 1 and e.rect.contains(x, y)]
+    return min(hits, key=lambda e: e.rect.area) if hits else None  # type: ignore[union-attr]
+
+
+def point_element(snap: Snapshot, x: int, y: int) -> Element:
+    """Pseudo element for a raw screen point, described by what lies under it.
+
+    The description feeds the risk gate, so a point outside the foreground window says which
+    window (or the desktop/taskbar) it would hit instead of looking like a harmless bare point.
+    """
+    fg = snap.foreground
+    in_fg = fg is not None and (fg.rect is None or fg.rect.contains(x, y))
+    under = element_at(snap, x, y) if in_fg else None
+    if under is not None:
+        return Element(id="", role="Point", name=f"({x},{y})", rect=Rect(x, y, x + 1, y + 1),
+                       window=under.window, path=f"over {under.describe(position=False, window=False)}")
+    # EnumWindows order is top-most first, so the first window containing the point is the one hit.
+    hit = next((w for w in snap.windows if not w.minimized and w.rect and w.rect.contains(x, y)), None)
+    if in_fg and fg is not None:
+        where, window = f'over an area without accessible elements in window "{fg.title}"', fg.title
+    elif hit is not None:
+        where = (f'OUTSIDE the foreground window, over window "{hit.title}"'
+                 + (f" ({hit.process})" if hit.process else ""))
+        window = hit.title
+    else:
+        where, window = "OUTSIDE every window: on the desktop or the taskbar", ""
+    return Element(id="", role="Point", name=f"({x},{y})", rect=Rect(x, y, x + 1, y + 1),
+                   window=window, path=where)
 
 
 # --------------------------------------------------------------------------- decision-facing state

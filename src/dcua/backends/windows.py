@@ -65,6 +65,7 @@ MOUSE_FLAGS = {
     "middle": (0x0020, 0x0040),
 }
 MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_ABSOLUTE = 0x0001, 0x4000, 0x8000
 WHEEL_DELTA = 120
 
 
@@ -111,10 +112,22 @@ def _key(vk: int = 0, scan: int = 0, flags: int = 0) -> INPUT:
     return inp
 
 
-def _mouse(flags: int, data: int = 0) -> INPUT:
+def _mouse(flags: int, data: int = 0, dx: int = 0, dy: int = 0) -> INPUT:
     inp = INPUT(type=INPUT_MOUSE)
-    inp.u.mi = MOUSEINPUT(dx=0, dy=0, mouseData=data & 0xFFFFFFFF, dwFlags=flags, time=0, dwExtraInfo=0)
+    inp.u.mi = MOUSEINPUT(dx=dx, dy=dy, mouseData=data & 0xFFFFFFFF, dwFlags=flags, time=0, dwExtraInfo=0)
     return inp
+
+
+def _move_to(x: int, y: int) -> INPUT:
+    """Absolute move as real input (apps that track WM_MOUSEMOVE during a drag need this)."""
+    vs = virtual_screen()
+    w, h = max(1, vs.width), max(1, vs.height)
+    x = min(max(int(x), vs.left), vs.left + w - 1)
+    y = min(max(int(y), vs.top), vs.top + h - 1)
+    # Windows maps n -> pixel n * width / 65536 (truncated); this inverse lands on the exact pixel.
+    nx = ((x - vs.left) * 65536 + w - 1) // w
+    ny = ((y - vs.top) * 65536 + h - 1) // h
+    return _mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, dx=nx, dy=ny)
 
 
 # ----------------------------------------------------------------------------- IME
@@ -518,6 +531,23 @@ class WindowsBackend(Backend):
         for _ in range(2 if double else 1):
             _send(_mouse(down), _mouse(up))
             time.sleep(0.04)
+
+    def mouse_drag(self, x1: int, y1: int, x2: int, y2: int, button: str = "left",
+                   steps: int = 20) -> None:
+        down, up = MOUSE_FLAGS[button]
+        n = max(1, steps)
+        user32.SetCursorPos(int(x1), int(y1))
+        _send(_move_to(x1, y1))
+        time.sleep(0.03)
+        _send(_mouse(down))
+        try:
+            time.sleep(0.08)  # let the app register the press before motion (drag-drop thresholds)
+            for i in range(1, n + 1):
+                time.sleep(0.01)
+                _send(_move_to(x1 + (x2 - x1) * i // n, y1 + (y2 - y1) * i // n))
+            time.sleep(0.03)
+        finally:
+            _send(_mouse(up))  # never leave a button held down
 
     def invoke(self, el: Element) -> bool:
         if el.handle is None:
