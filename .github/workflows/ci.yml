@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python: ["3.10", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      # Only declared dependencies: core + dev (+ the Windows extra where it applies).
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: uv run --extra dev --extra windows --extra mcp pytest -q
+      - name: Test (Linux)
+        if: runner.os != 'Windows'
+        run: uv run --extra dev --extra mcp pytest -q
+      - name: CLI and MCP server import
+        run: uv run --extra mcp python -c "import dcua.cli, dcua.mcp_server, dcua.tools"
