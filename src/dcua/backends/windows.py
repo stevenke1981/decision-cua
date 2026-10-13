@@ -118,6 +118,11 @@ def _mouse(flags: int, data: int = 0, dx: int = 0, dy: int = 0) -> INPUT:
     return inp
 
 
+def _set_cursor(x: int, y: int) -> None:
+    if not user32.SetCursorPos(int(x), int(y)):
+        raise OSError(ctypes.get_last_error(), "SetCursorPos failed; no input was sent")
+
+
 def _move_to(x: int, y: int) -> INPUT:
     """Absolute move as real input (apps that track WM_MOUSEMOVE during a drag need this)."""
     vs = virtual_screen()
@@ -526,7 +531,7 @@ class WindowsBackend(Backend):
     # ------------------------------------------------------------- input
     def mouse_click(self, x: int, y: int, button: str = "left", double: bool = False) -> None:
         down, up = MOUSE_FLAGS[button]
-        user32.SetCursorPos(int(x), int(y))
+        _set_cursor(x, y)
         time.sleep(0.03)
         for _ in range(2 if double else 1):
             _send(_mouse(down), _mouse(up))
@@ -536,7 +541,7 @@ class WindowsBackend(Backend):
                    steps: int = 20) -> None:
         down, up = MOUSE_FLAGS[button]
         n = max(1, steps)
-        user32.SetCursorPos(int(x1), int(y1))
+        _set_cursor(x1, y1)
         _send(_move_to(x1, y1))
         time.sleep(0.03)
         _send(_mouse(down))
@@ -574,6 +579,9 @@ class WindowsBackend(Backend):
             return False
 
     def type_text(self, text: str) -> None:
+        # Reject malformed strings before an earlier batch can reach the application.
+        text.encode("utf-16-le")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         batch: list[INPUT] = []
 
         def flush() -> None:
@@ -584,8 +592,6 @@ class WindowsBackend(Backend):
 
         with _ime_closed():
             for ch in text:
-                if ch == "\r":
-                    continue
                 if ch in "\n\t":
                     vk = VK["enter"] if ch == "\n" else VK["tab"]
                     batch += [_key(vk), _key(vk, flags=KEYEVENTF_KEYUP)]
@@ -607,12 +613,14 @@ class WindowsBackend(Backend):
         # An open CJK IME turns letter keys into composition (e.g. "x" -> 力), so close it
         # for the duration of the chord, the same way type_text does.
         with _ime_closed():
-            _send(*downs)
-            time.sleep(0.03)
-            _send(*ups)
+            try:
+                _send(*downs)
+                time.sleep(0.03)
+            finally:
+                _send(*ups)  # partial SendInput must not leave modifiers held down
 
     def scroll(self, x: int, y: int, clicks: int) -> None:
-        user32.SetCursorPos(int(x), int(y))
+        _set_cursor(x, y)
         time.sleep(0.03)
         _send(_mouse(MOUSEEVENTF_WHEEL, clicks * WHEEL_DELTA))
 

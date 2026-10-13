@@ -55,4 +55,5 @@ def parse_chord(chord: str | list[str]) -> list[str]:
 
 
 def is_risky_chord(keys: list[str]) -> bool:
-    return tuple(keys) in RISKY_CHORDS
+    pressed = set(keys)
+    return any(set(chord) <= pressed for chord in RISKY_CHORDS)

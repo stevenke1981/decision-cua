@@ -60,4 +60,9 @@ appeared, check the foreground before typing. Each result also carries `timing:`
 - Menus and drop-downs open as popups; after clicking a menu, `observe()` again to see items.
 - Typing works in any language (`type_text("你好")`); use `clear=true` to replace a field,
   `submit=true` to press Enter.
+- `submit=true` and text containing line breaks require confirmation because Enter can submit
+  a form or execute a command. A non-submitting write also checks the readable field value;
+  masked, truncated or mismatching values remain `unverified`.
+- Unknown foreground, failed focus recovery and vanished target rectangles stop input.
+  With `if_revision`, the screen is checked again after foreground recovery.
 - Large lists: `scroll(direction="down", target="the file list")`, then observe.
