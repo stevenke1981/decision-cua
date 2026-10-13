@@ -7,8 +7,8 @@ import pytest
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows SendInput backend")
 
 
-def test_press_sends_chord_inside_ime_closed_block(monkeypatch):
-    from dcua.backends import windows as w
+def test_press_sends_chord_inside_ime_closed_block(monkeypatch, windows_module):
+    w = windows_module
 
     events: list[str] = []
 
@@ -26,6 +26,6 @@ def test_press_sends_chord_inside_ime_closed_block(monkeypatch):
     monkeypatch.setattr(w, "_send", fake_send)
     monkeypatch.setattr(w.time, "sleep", lambda _s: None)
 
-    w.WindowsBackend().press(["ctrl", "l"])
+    object.__new__(w.WindowsBackend).press(["ctrl", "l"])
 
     assert events == ["ime-closed", "send:2", "send:2", "ime-restored"]

@@ -57,7 +57,13 @@ def test_agent_writes_and_saves_note_with_tool_calls(tmp_path):
 
 
 def test_json_protocol_for_models_without_function_calling(tmp_path):
-    s, sim, backend, ctrl = make(tmp_path, protocol="json")
+    confirmations = []
+
+    async def approve(text):
+        confirmations.append(text)
+        return True
+
+    s, sim, backend, ctrl = make(tmp_path, protocol="json", confirm=approve)
     replies = [
         'Sure! ```json\n{"thought": "save first", "tool": "hotkey", "args": {"keys": "ctrl+s"}}\n```',
         '<think>dialog is open</think>{"thought":"name it","tool":"type_text","args":{"text":"notes.txt","target":"File name","clear":true,"submit":true}}',
@@ -75,6 +81,7 @@ def test_json_protocol_for_models_without_function_calling(tmp_path):
 
     out = asyncio.run(go())
     assert out.success and backend.saved_as == "notes.txt"
+    assert len(confirmations) == 1 and "press Enter" in confirmations[0]
     system = planner_sim.seen[0][0]["content"]
     assert "exactly one JSON object" in system
     first = planner_sim.seen[0]
@@ -119,7 +126,10 @@ def test_risky_action_without_callback_returns_needs_confirmation(tmp_path):
 
 
 def test_premature_done_is_pushed_back(tmp_path):
-    s, sim, backend, ctrl = make(tmp_path)
+    async def approve(text):
+        return True
+
+    s, sim, backend, ctrl = make(tmp_path, confirm=approve)
     script = [
         tool_call("done", {"summary": "saved it", "success": True}, 1),   # lie: nothing saved
         tool_call("hotkey", {"keys": "ctrl+s"}, 2),

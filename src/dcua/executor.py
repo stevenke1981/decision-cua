@@ -2,8 +2,8 @@
 
 Flow for an action like click("the Save button in the dialog"):
 
-    fresh snapshot ──► grounding (Decision-1 choice)  ┐  run concurrently
-                   └─► risk gate  (Decision-1 noul)   ┘
+    fresh snapshot ──► grounding (Decision-1 choice)
+                   └─► risk gate on the resolved control (Decision-1 noul)
         low confidence  -> return top candidates to the planner (no action)
         risky           -> ask for confirmation (callback or needs_confirmation)
         ok              -> act (mouse / invoke / SendInput)
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterator
 
-from .backends import Backend, Element, Snapshot, WindowInfo, create_backend
+from .backends import Backend, Element, Rect, Snapshot, WindowInfo, create_backend
 from .config import Settings
 from .decisions import Choice, DecisionClient, DecisionError
 from .grounding import Grounder, GroundingResult, parse_element_ref
@@ -39,6 +39,7 @@ from .observe import (IdRegistry, diff, element_dict, iso_time, parse_point, poi
 log = logging.getLogger("dcua.executor")
 
 ConfirmFn = Callable[[str], Awaitable[bool]]
+ValueCheck = Callable[[Snapshot], bool | None]
 LAUNCH_GRACE_S = 1.5   # after this, any new window counts even if its process name differs
 
 
@@ -283,7 +284,7 @@ class ComputerController:
                                         grounding_p=ans.p)
                 matches = [pool[int(ans.choice[1:])]]
         target = matches[0]
-        ok = await self.backend.call("focus_window", target)
+        ok = await self._bring_up(target)
         await asyncio.sleep(self.s.settle_s / 2)
         self._log("focus", query=query, title=target.title, ok=ok)
         return ActionResult(ok, "done" if ok else "error",
@@ -358,7 +359,7 @@ class ComputerController:
                     return
                 if mode == "invoke":
                     log.info("invoke unsupported on %s, falling back to mouse", el.id)
-            rect = await self.backend.call("current_rect", el) or el.rect
+            rect = await self._current_rect(el)
             x, y = rect.center
             await self.backend.call("mouse_click", x, y, button, double)
 
@@ -398,14 +399,14 @@ class ComputerController:
         if gate:
             gate.timing_ms = timing.done()
             return gate
-        stale = await self._recheck(if_revision, timing)
-        if stale:
-            return stale
         with timing("act"):
             try:
                 await self._ensure_foreground(a, before)
-                ra = await self.backend.call("current_rect", a) or a.rect
-                rb = await self.backend.call("current_rect", b) or b.rect
+                stale = await self._recheck(if_revision, timing)
+                if stale:
+                    return stale
+                ra = await self._current_rect(a)
+                rb = await self._current_rect(b)
                 await self.backend.call("mouse_drag", *ra.center, *rb.center, button)
             except Exception as exc:
                 return ActionResult(False, "error", f"drag failed: {exc}", timing_ms=timing.done())
@@ -414,13 +415,44 @@ class ComputerController:
     async def type_text(self, text: str, target: str | None = None, clear: bool = False,
                         submit: bool = False, expect: str | None = None,
                         confirm: bool = False, if_revision: str | None = None) -> ActionResult:
+        # Validate the whole string before focusing, clearing or sending any part of it.
+        try:
+            text.encode("utf-16-le")
+        except UnicodeEncodeError:
+            return ActionResult(False, "error", "text contains an invalid Unicode surrogate")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
         shown = text if len(text) <= 80 else text[:77] + "..."
+        # Enter can send a message or execute a command even with submit=False.
+        base = 1.0 if submit or "\n" in text else None
+        expected_value: tuple[str, str] | None = None
+
+        def normalized(value: str) -> str:
+            # Windows ValuePattern snapshots replace line breaks with spaces.
+            return value.replace("\r", " ").replace("\n", " ")
+
+        def check_value(after: Snapshot) -> bool | None:
+            if expected_value is None:
+                return None
+            eid, expected = expected_value
+            actual = after.by_id(eid)
+            if actual is None or actual.value is None:
+                return None
+            return normalized(actual.value) == expected
 
         async def act(el: Element | None) -> None:
+            nonlocal expected_value
             if el is not None and not el.focused:
-                rect = await self.backend.call("current_rect", el) or el.rect
+                rect = await self._current_rect(el)
                 await self.backend.call("mouse_click", *rect.center, "left", False)
                 await asyncio.sleep(0.1)
+            focused = (await self.snapshot()).focused
+            if focused is None or (el is not None and focused.id != el.id):
+                raise RuntimeError("The target did not gain keyboard focus; no text was cleared or typed")
+            value = focused.value
+            if value is not None and value != "••••" and len(value) < 200:
+                expected = normalized(("" if clear else value) + text)
+                if len(expected) <= 200:
+                    expected_value = (focused.id, expected)
             if clear:
                 if el is None or not await self.backend.call("set_value", el, ""):
                     await self.backend.call("press", ["ctrl", "a"])
@@ -434,8 +466,10 @@ class ComputerController:
         if target is None:
             # Type into whatever has keyboard focus.
             return await self._focused_action(detail, expect, confirm, lambda: act(None),
-                                              if_revision=if_revision)
-        return await self._element_action("type", detail, target, expect, confirm, act, if_revision)
+                                              base_p=base, if_revision=if_revision,
+                                              value_check=None if submit else check_value)
+        return await self._element_action("type", detail, target, expect, confirm, act, if_revision,
+                                          base_p=base, value_check=None if submit else check_value)
 
     async def hotkey(self, keys: str, expect: str | None = None, confirm: bool = False,
                      if_revision: str | None = None) -> ActionResult:
@@ -476,7 +510,8 @@ class ComputerController:
     # ------------------------------------------------------------------ internals
     async def _element_action(self, action: str, detail: str, target: str, expect: str | None,
                               confirm: bool, act: Callable[[Element], Awaitable[None]],
-                              if_revision: str | None = None) -> ActionResult:
+                              if_revision: str | None = None, base_p: float | None = None,
+                              value_check: ValueCheck | None = None) -> ActionResult:
         timing = Timing()
         with timing("observe"):
             before = await self.snapshot()
@@ -488,14 +523,7 @@ class ComputerController:
 
         with timing("decide"):
             try:
-                if parse_point(target):  # nothing to ground: judge risk on what lies under the point
-                    g = await self._resolve(target, before, action)
-                    risk_p = await self.guard.risk(self.task, f"{detail} on {g.element.describe()}", target,
-                                                   window) if g.element else 0.0
-                else:
-                    g, risk_p = await asyncio.gather(
-                        self._resolve(target, before, action),
-                        self.guard.risk(self.task, f"{detail} on {target}", target, window))
+                g = await self._resolve(target, before, action)
             except DecisionError as exc:
                 return ActionResult(False, "error", f"decision model error: {exc}", timing_ms=timing.done())
 
@@ -510,33 +538,35 @@ class ComputerController:
 
             el = g.element
             target_desc = f"[{el.id}] {el.describe(window=False)}" if el.id else el.describe(window=False)
-            # Re-assess risk with the concrete element (cheap, more precise) when the first pass was close.
-            if ref is None and abs(risk_p - self.s.risk_threshold) < 0.15:
-                try:
-                    risk_p = await self.guard.risk(self.task, f"{detail} on {el.describe()}", target_desc, window)
-                except DecisionError:
-                    pass
+            # An id or vague description must not hide the actual control's consequences.
+            try:
+                risk_p = base_p if base_p is not None else await self.guard.risk(
+                    self.task, f"{detail} on {el.describe()}", target_desc, window)
+            except DecisionError as exc:
+                return ActionResult(False, "error", f"decision model error: {exc}", timing_ms=timing.done())
         gate = await self._gate(action, f"{detail} -> {target_desc}", risk_p, confirm, base_p=None,
                                 target=target_desc, grounding_p=g.probability)
         if gate:
             gate.timing_ms = timing.done()
             return gate
 
-        stale = await self._recheck(if_revision, timing)
-        if stale:
-            return stale
         with timing("act"):
             try:
                 await self._ensure_foreground(el, before)
+                stale = await self._recheck(if_revision, timing)
+                if stale:
+                    return stale
                 await act(el)
             except Exception as exc:  # OS-level failure (UIPI, element vanished, ...)
                 return ActionResult(False, "error", f"{action} failed: {exc}", target=target_desc,
                                     timing_ms=timing.done())
-        return await self._after(action, detail, target_desc, expect, before, g.probability, risk_p, timing)
+        return await self._after(action, detail, target_desc, expect, before, g.probability, risk_p,
+                                 timing, value_check)
 
     async def _focused_action(self, detail: str, expect: str | None, confirm: bool,
                               act: Callable[[], Awaitable[None]], base_p: float | None = None,
-                              if_revision: str | None = None) -> ActionResult:
+                              if_revision: str | None = None,
+                              value_check: ValueCheck | None = None) -> ActionResult:
         timing = Timing()
         with timing("observe"):
             before = await self.snapshot()
@@ -555,16 +585,16 @@ class ComputerController:
         if gate:
             gate.timing_ms = timing.done()
             return gate
-        stale = await self._recheck(if_revision, timing)
-        if stale:
-            return stale
         with timing("act"):
             try:
                 await self._ensure_foreground(before.focused, before)
+                stale = await self._recheck(if_revision, timing)
+                if stale:
+                    return stale
                 await act()
             except Exception as exc:
                 return ActionResult(False, "error", f"{detail} failed: {exc}", timing_ms=timing.done())
-        return await self._after("keys", detail, focus, expect, before, None, risk_p, timing)
+        return await self._after("keys", detail, focus, expect, before, None, risk_p, timing, value_check)
 
     def _stale(self, before: Snapshot, if_revision: str | None, timing: Timing) -> ActionResult | None:
         """Refuse to act when the caller decided on a screen state that is no longer current."""
@@ -604,16 +634,23 @@ class ComputerController:
             target = next((w for w in snap.windows if w.title == el.window), None)
         target = target or fg
         if target is None:
-            return
+            raise RuntimeError("No observed foreground window; refusing to send input")
         windows: list[WindowInfo] = await self.backend.call("list_windows")
         now = next((w for w in windows if w.focused), None)
-        if now is None or now.handle == target.handle:  # unknown (e.g. a menu is up) or unchanged
+        if now is not None and now.handle == target.handle:
             return
-        if not await self.backend.call("focus_window", target):
-            raise RuntimeError(f'"{now.title}" took the foreground and "{target.title}" could not be '
+        if not await self._bring_up(target):
+            raise RuntimeError(f'"{now.title if now else "unknown foreground"}" took the foreground '
+                               f'and "{target.title}" could not be '
                                "brought back")
-        self._log("refocus", window=target.title, was=now.title)
+        self._log("refocus", window=target.title, was=now.title if now else None)
         await asyncio.sleep(self.s.settle_s / 2)
+
+    async def _current_rect(self, el: Element) -> Rect:
+        rect = await self.backend.call("current_rect", el)
+        if rect is None or rect.area <= 0:
+            raise RuntimeError("The target is no longer available; refusing to use old coordinates")
+        return rect
 
     async def _gate(self, action: str, detail: str, risk_p: float | None, confirm: bool,
                     base_p: float | None, target: str | None = None,
@@ -638,7 +675,7 @@ class ComputerController:
 
     async def _after(self, action: str, detail: str, target_desc: str, expect: str | None,
                      before: Snapshot, grounding_p: float | None, risk_p: float | None,
-                     timing: Timing | None = None) -> ActionResult:
+                     timing: Timing | None = None, value_check: ValueCheck | None = None) -> ActionResult:
         timing = timing or Timing()
         with timing("settle"):
             await asyncio.sleep(self.s.settle_s)
@@ -647,23 +684,29 @@ class ComputerController:
         d = diff(before, after)
         changes = summarize_diff(d)
         verified: float | None = None
-        status = "done"
+        value_verified = value_check(after) if value_check else None
+        status = "unverified"
         if self.s.verify_actions:
             with timing("verify"):
                 try:
                     verified = await self.guard.verify(f"{detail} ({target_desc})", expect, before, after, d)
                 except DecisionError as exc:
                     log.warning("verify failed: %s", exc)
-            if verified is not None and verified < self.s.verify_threshold:
-                status = "unverified"
+            if (verified is not None and verified >= self.s.verify_threshold
+                    and (value_check is None or value_verified is True)):
+                status = "done"
         msg = f"{detail}" + (" — outcome NOT confirmed, re-observe before continuing" if status == "unverified" else "")
+        if value_check is not None and value_verified is not True:
+            msg += "; typed value could not be confirmed from the readable field"
         revision = snapshot_revision(after)
         timing_ms = timing.done()
         self._log("action", action=action, detail=detail, target=target_desc, grounding_p=grounding_p,
-                  risk_p=risk_p, verified_p=verified, changes=changes, revision=revision, timing_ms=timing_ms)
+                  risk_p=risk_p, verified_p=verified, value_verified=value_verified, changes=changes,
+                  revision=revision, timing_ms=timing_ms)
         return ActionResult(True, status, msg, target=target_desc, grounding_p=grounding_p,
                             risk_p=risk_p, verified_p=verified, changes=changes, revision=revision,
-                            timing_ms=timing_ms)
+                            timing_ms=timing_ms,
+                            extra={"value_verified": value_verified} if value_check else {})
 
     @staticmethod
     def _grounding_failure(target: str, g: GroundingResult) -> ActionResult:

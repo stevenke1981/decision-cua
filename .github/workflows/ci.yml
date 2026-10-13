@@ -19,11 +19,13 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       # Only declared dependencies: core + dev (+ the Windows extra where it applies).
+      - name: Lint
+        run: uv run --locked --extra dev ruff check src tests
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        run: uv run --extra dev --extra windows --extra mcp pytest -q
+        run: uv run --locked --extra dev --extra windows --extra mcp pytest -q
       - name: Test (Linux)
         if: runner.os != 'Windows'
-        run: uv run --extra dev --extra mcp pytest -q
+        run: uv run --locked --extra dev --extra mcp pytest -q
       - name: CLI and MCP server import
-        run: uv run --extra mcp python -c "import dcua.cli, dcua.mcp_server, dcua.tools"
+        run: uv run --locked --extra mcp python -c "import dcua.cli, dcua.mcp_server, dcua.tools"

@@ -22,12 +22,13 @@ planner: click(target="儲存按鈕", expect="出現另存新檔對話框")
    │
    ├─ snapshot()            UIA 走訪前景視窗（+ 選單/下拉 popup），穩定 id（IdRegistry）
    │
-   ├─ 並行 ┬─ grounding     choice：候選元件 e1..eN + none   （>20 個時分組並行 → 決賽）
-   │       └─ risk gate     noul：是否難以復原 / 有外部後果
+   ├─ grounding             choice：候選元件 e1..eN + none   （>20 個時分組並行 → 決賽）
+   ├─ risk gate             noul：以實際元件標籤／值／視窗判斷是否難以復原 / 有外部後果
    │
    ├─ grounding p < 0.55    → 回傳 [ambiguous] + 前幾名候選與機率，不動作
    ├─ risk p ≥ 0.5          → CLI 問人 / MCP 回 [needs_confirmation]
    │
+   ├─ 確認前景 → 重查 revision；元件消失則停止，不沿用舊座標
    ├─ 動作                  SetCursorPos + SendInput（或 UIA Invoke / ValuePattern）
    ├─ settle → snapshot()   → diff（程式碼算：開關了哪些視窗、值變化、元件增減）
    └─ verify                noul：expected outcome 是否出現 → [done] / [unverified]
@@ -44,8 +45,8 @@ planner: click(target="儲存按鈕", expect="出現另存新檔對話框")
 | 動作 | 呼叫 | 延遲（P50 ≈ 0.23s/次，OpenRouter 頁面數據） |
 |---|---|---|
 | 以 id 點擊 | risk + verify = 2 | ~0.5s |
-| 以描述點擊（≤20 候選） | grounding ∥ risk + verify = 3 | ~0.5s（前兩個並行） |
-| 以描述點擊（60 候選） | 3 組並行 + 決賽 + risk + verify = 6 | ~0.75s |
+| 以描述點擊（≤20 候選） | grounding → risk + verify = 3 | ~0.75s（風險依實際元件判斷） |
+| 以描述點擊（60 候選） | 3 組並行 + 決賽 + risk + verify = 6 | ~1s |
 | hotkey / 無目標 type | risk + verify = 2 | ~0.5s |
 
 ## 門檻怎麼調
@@ -71,6 +72,10 @@ dcua ground "檔名輸入框" --action type
   Decision-1 搜尋，大模型 token 用量大幅下降。
 
 ## 已知限制
+
+- 前述 API 延遲為舊基準的流程估算，本輪安全回歸未呼叫付費 API。
+- 文字含換行或 `submit=true` 時採固定確認閘門。可讀欄位的非送出型輸入還會比對值；
+  遮罩、截斷、未讀到值或模型驗證不可用時回 `unverified`。詳細測試範圍見 [SAFETY_VALIDATION.md](SAFETY_VALIDATION.md)。
 
 - 以系統管理員身分執行的視窗：Windows UIPI 會擋下一般權限程式的輸入，需以系統管理員執行 dcua。
 - UIA 支援差的 App（部分遊戲、自繪 UI、某些 Electron 設定）元件樹會很貧乏。

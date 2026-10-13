@@ -79,6 +79,9 @@ uv run dcua run "..." --protocol json --model <model-id>
 - `ground(target)`：只判斷不動作。回 JSON：選中的元件、候選與機率、risk、是否需確認、`revision`。
 - `observe(format="json")`：元件 id、rect、值、`revision`、`observed_at`（含時區），供程式或外部審查使用。
 - `click` / `type_text` / `hotkey` / `drag` 皆可帶 `if_revision`，把動作綁定在做決定時的畫面上。
+- 切回前景後才重查 `if_revision`；無法確認前景或目標已消失時停止輸入。
+- `type_text(submit=true)` 或文字含換行會要求確認，因為 Enter 可能送出表單或執行命令。
+- 非送出型的文字輸入會比對可讀欄位值；值不符、被遮罩／截斷或驗證不可用時回 `unverified`。
 
 **OpenCode** — 把 `integrations/opencode.json` 的 `mcp` 區塊併入你的 `opencode.json`。
 **Claude Code** — `claude mcp add decision-cua -- uv run --directory C:\path\to\decision-cua dcua mcp`
@@ -136,7 +139,7 @@ uv run dcua ground "640,360" --json             # 座標目標：底下是哪個
 
 ## 成本
 
-每個動作通常 2–3 次 Decision 呼叫（grounding 與風險並行、之後驗證），每次幾百到一千多 input token。
+每個動作通常 2–3 次 Decision 呼叫（先 grounding，再以實際元件判斷風險，之後驗證），每次幾百到一千多 input token。
 每個動作合計約 1–3 千 token；以 $0.042 / 百萬 input token 計，**一千個動作的決策成本約 0.05–0.15 美元**，成本主要會在 planner 那邊。
 `dcua run` 結束時會印出實際的 `decision_cost`。
 
@@ -161,14 +164,17 @@ src/dcua/
     pacman.py         Pac-Man 規則與盤面文字（無 UI，可測試）
     pacman_agent.py   Decision-1 / 啟發式策略、無視窗遊戲迴圈
     pacman_tk.py      tkinter 視窗：迷宮、HUD、機率箭頭
-tests/                55 個測試：模擬 Decisions API + 腳本化 planner + 假桌面的端到端流程、Pac-Man 規則與策略
+tests/                離線測試：模擬 Decisions API、planner、假桌面及 Win32 DLL；涵蓋安全回歸與 Pac-Man
 skills/               給 agent 用的 SKILL.md
 integrations/         OpenCode / Claude Code 設定範例
 ```
 
 ```powershell
-uv run --extra dev pytest -q
+uv run --locked --extra dev ruff check src tests
+uv run --locked --extra dev --extra mcp pytest -q
 ```
+
+回歸案例、Windows 測試的隔離方式與未驗限制見 [docs/SAFETY_VALIDATION.md](docs/SAFETY_VALIDATION.md)。
 
 ## 已知限制
 
